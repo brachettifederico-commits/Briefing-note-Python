@@ -1,387 +1,404 @@
-<!DOCTYPE html>
-<html lang="it">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Briefing Note Generator · CZP</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <style>
-    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+import os
+import json
+import re
+import io
+from datetime import datetime
+from flask import Flask, request, jsonify, send_file, render_template
+import anthropic
+from docx import Document
+from docx.shared import Pt, RGBColor, Cm
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml.ns import qn
+from docx.oxml import OxmlElement
 
-    :root {
-      --ink: #1a1814;
-      --ink-soft: #4a4540;
-      --ink-faint: #8a8480;
-      --paper: #f7f4ef;
-      --paper-warm: #ede9e2;
-      --paper-dark: #e0dbd2;
-      --accent: #1F3864;
-      --link: #2a5cb8;
-      --border: #ccc8c0;
-      --font-serif: 'EB Garamond', Georgia, serif;
-      --font-mono: 'DM Mono', monospace;
+app = Flask(__name__)
+
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
+SEARCH_PROMPT = """Cerca informazioni aggiornate e dettagliate su questa persona:
+- Nome: {nome}{istituzione}
+- Focus tematico di interesse: {focus}
+
+Trova e riporta in modo dettagliato:
+1. Data e luogo di nascita
+2. Ruolo istituzionale attuale
+3. Carriera professionale completa (cronologica)
+4. Carriera politica completa (cronologica)
+5. Posizioni, dichiarazioni, attività specifiche sul tema "{focus}"
+6. Per ogni informazione, indica la fonte URL
+
+Sii preciso e dettagliato. Includi date, ruoli e contesti specifici."""
+
+JSON_SYSTEM = """Sei un assistente che redige briefing note istituzionali italiane per uno studio di public affairs.
+
+Ti viene fornito un testo con informazioni su una persona. Struttura queste informazioni in JSON valido.
+
+Regole assolute:
+- Rispondi SOLO con JSON valido, nessun testo prima o dopo
+- Nessun tag HTML, nessun markdown, nessun <cite>, testo plain
+- Italiano formale e istituzionale
+- Se un'informazione non è disponibile scrivi "Dato non disponibile"
+
+Formato JSON esatto:
+{
+  "nome": "Nome Cognome",
+  "luogo_nascita": "Nato/a a Città (Provincia) il GG mese AAAA",
+  "ruolo_attuale": "Ruolo istituzionale attuale completo",
+  "background_sintetico": "Ex X, Y e Z (max 10 parole)",
+  "istituzione_contesto": "Es: Camera dei Deputati",
+  "carriera_professionale": "Testo narrativo prosa cronologico, 150-250 parole, stile istituzionale.",
+  "carriera_professionale_url": "URL fonte oppure null",
+  "carriera_politica": "Testo narrativo prosa cronologico, 150-250 parole, stile istituzionale.",
+  "carriera_politica_url": "URL fonte oppure null",
+  "focus_titolo": "Titolo focus tematico (es: Digitale, IA e Cybersecurity)",
+  "focus_items": [
+    {
+      "titolo": "Titolo breve del punto",
+      "testo": "Descrizione della posizione o attività. 2-4 frasi plain text.",
+      "url": "URL fonte oppure null"
     }
-
-    html, body { height: 100%; background: var(--paper); color: var(--ink); font-family: var(--font-serif); font-size: 17px; line-height: 1.6; }
-
-    .shell { min-height: 100vh; display: grid; grid-template-columns: 360px 1fr; }
-
-    .sidebar {
-      background: var(--accent); color: white;
-      padding: 3rem 2.5rem;
-      display: flex; flex-direction: column; gap: 2rem;
-      position: sticky; top: 0; height: 100vh; overflow-y: auto;
-    }
-
-    .brand .label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 2px; text-transform: uppercase; opacity: .55; }
-    .brand h1 { font-size: 24px; font-weight: 500; line-height: 1.2; margin-top: 6px; }
-    .brand p { font-size: 13px; opacity: .6; line-height: 1.5; margin-top: 4px; }
-
-    .form-group { display: flex; flex-direction: column; gap: 5px; }
-    .form-group label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; opacity: .65; }
-    .form-group .hint { font-size: 12px; opacity: .45; margin-top: -2px; }
-    .form-group input {
-      background: rgba(255,255,255,.1); border: 1px solid rgba(255,255,255,.2);
-      border-radius: 4px; color: white; font-family: var(--font-serif); font-size: 15px;
-      padding: 9px 12px; outline: none; transition: border-color .2s, background .2s;
-    }
-    .form-group input::placeholder { color: rgba(255,255,255,.35); }
-    .form-group input:focus { border-color: rgba(255,255,255,.6); background: rgba(255,255,255,.15); }
-    .form-group input[type="date"] { color-scheme: dark; }
-
-    .generate-btn {
-      padding: 12px 20px; background: white; color: var(--accent);
-      border: none; border-radius: 4px; font-family: var(--font-serif);
-      font-size: 15px; font-weight: 500; cursor: pointer;
-      display: flex; align-items: center; justify-content: center; gap: 8px;
-      transition: opacity .2s;
-    }
-    .generate-btn:hover:not(:disabled) { opacity: .9; }
-    .generate-btn:disabled { opacity: .4; cursor: not-allowed; }
-
-    .spinner { width: 14px; height: 14px; border: 2px solid rgba(31,56,100,.3); border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; display: none; }
-    .loading .spinner { display: block; }
-    @keyframes spin { to { transform: rotate(360deg); } }
-
-    .error-box { background: rgba(255,255,255,.12); border: 1px solid rgba(255,100,100,.4); border-radius: 4px; padding: 10px 14px; font-size: 13px; color: #ffb3b3; line-height: 1.5; display: none; }
-    .error-box.visible { display: block; }
-
-    .main { padding: 4rem 3.5rem; max-width: 800px; }
-
-    .empty-state { display: flex; flex-direction: column; gap: 16px; padding-top: 4rem; color: var(--ink-faint); }
-    .empty-state .big { font-size: 96px; line-height: 1; color: var(--paper-dark); font-weight: 500; letter-spacing: -4px; user-select: none; }
-    .empty-state p { font-size: 15px; max-width: 320px; line-height: 1.7; }
-
-    .skeleton { display: none; flex-direction: column; gap: 1rem; padding-top: 1rem; }
-    .skeleton.visible { display: flex; }
-    .skel { height: 14px; background: linear-gradient(90deg, var(--paper-dark) 25%, var(--paper-warm) 50%, var(--paper-dark) 75%); background-size: 200% 100%; border-radius: 3px; animation: shimmer 1.4s infinite; }
-    @keyframes shimmer { to { background-position: -200% 0; } }
-
-    .preview { display: none; }
-    .preview.visible { display: block; }
-
-    .preview-header { border-bottom: 2px solid var(--accent); padding-bottom: 1.5rem; margin-bottom: 2rem; }
-    .preview-meta { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--ink-faint); margin-bottom: 8px; }
-    .preview-name { font-size: 40px; font-weight: 500; color: var(--accent); line-height: 1.1; letter-spacing: -.5px; margin-bottom: 6px; }
-    .preview-role { font-size: 16px; color: var(--ink-soft); }
-    .preview-bg { font-size: 14px; color: var(--ink-faint); font-style: italic; margin-top: 4px; }
-
-    .section { display: grid; grid-template-columns: 180px 1fr; border-bottom: 1px solid var(--border); }
-    .section:last-of-type { border-bottom: none; }
-    .section-label { padding: 1.5rem 1.5rem 1.5rem 0; font-family: var(--font-mono); font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase; color: var(--ink-faint); line-height: 1.4; }
-    .section-content { padding: 1.5rem 0 1.5rem 1.5rem; font-size: 15px; line-height: 1.8; border-left: 1px solid var(--border); }
-
-    .section-actions { display: flex; gap: 8px; margin-top: 10px; }
-    .edit-btn { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; padding: 4px 10px; border: 1px solid var(--border); border-radius: 3px; background: transparent; color: var(--ink-faint); cursor: pointer; transition: all .15s; }
-    .edit-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-    .edit-area { width: 100%; min-height: 120px; font-family: var(--font-serif); font-size: 14px; line-height: 1.7; padding: 10px; border: 1px solid var(--border); border-radius: 4px; resize: vertical; display: none; margin-top: 8px; }
-    .edit-area.visible { display: block; }
-    .save-btn { font-family: var(--font-mono); font-size: 10px; letter-spacing: 1px; text-transform: uppercase; padding: 4px 10px; border: 1px solid var(--accent); border-radius: 3px; background: var(--accent); color: white; cursor: pointer; display: none; margin-top: 6px; }
-    .save-btn.visible { display: inline-block; }
-
-    .focus-item { margin-bottom: 1rem; }
-    .focus-item:last-child { margin-bottom: 0; }
-    .source-link { font-family: var(--font-mono); font-size: 11px; color: var(--link); text-decoration: none; margin-left: 6px; opacity: .8; }
-    .source-link:hover { opacity: 1; text-decoration: underline; }
-
-    .download-bar { margin-top: 2.5rem; padding-top: 2rem; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 12px; }
-    .download-btn { padding: 10px 24px; background: var(--accent); color: white; border: none; border-radius: 4px; font-family: var(--font-serif); font-size: 15px; cursor: pointer; transition: opacity .2s; }
-    .download-btn:hover { opacity: .85; }
-    .download-btn:disabled { opacity: .4; cursor: not-allowed; }
-    .download-hint { font-size: 13px; color: var(--ink-faint); font-style: italic; }
-
-    @media (max-width: 860px) {
-      .shell { grid-template-columns: 1fr; }
-      .sidebar { position: static; height: auto; }
-      .main { padding: 2rem 1.5rem; }
-      .section { grid-template-columns: 1fr; }
-      .section-content { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 1rem; }
-    }
-  </style>
-</head>
-<body>
-<div class="shell">
-
-  <aside class="sidebar">
-    <div class="brand">
-      <span class="label">CZP &amp; Co.</span>
-      <h1>Briefing Note<br/>Generator</h1>
-      <p>Inserisci i dati della persona. Claude cercherà informazioni aggiornate e compilerà la note nel formato CZP.</p>
-    </div>
-
-    <div style="display:flex;flex-direction:column;gap:1.1rem;">
-      <div class="form-group">
-        <label>Nome e Cognome *</label>
-        <input id="nome" type="text" placeholder="es. Mario Rossi" autocomplete="off" />
-      </div>
-      <div class="form-group">
-        <label>Istituzione / Ruolo</label>
-        <span class="hint">Opzionale — per disambiguare</span>
-        <input id="istituzione" type="text" placeholder="es. Senato, AGCOM, MEF…" autocomplete="off" />
-      </div>
-      <div class="form-group">
-        <label>Focus tematico *</label>
-        <span class="hint">Varia in base al cliente</span>
-        <input id="focus" type="text" placeholder="es. IA e cloud, Trasporti…" autocomplete="off" />
-      </div>
-      <div class="form-group">
-        <label>Data del meeting</label>
-        <span class="hint">Opzionale</span>
-        <input id="dataMeeting" type="date" />
-      </div>
-    </div>
-
-    <div style="display:flex;flex-direction:column;gap:10px;">
-      <button class="generate-btn" id="generateBtn" onclick="generate()">
-        <div class="spinner" id="spinner"></div>
-        <span id="btnText">Genera briefing note</span>
-      </button>
-      <div class="error-box" id="errorBox"></div>
-    </div>
-  </aside>
-
-  <main class="main">
-    <div class="empty-state" id="emptyState">
-      <div class="big">—</div>
-      <p>Compila i campi a sinistra e premi <em>Genera</em> per produrre una briefing note istituzionale con ricerca automatica.</p>
-    </div>
-
-    <div class="skeleton" id="skeleton">
-      <div class="skel" style="width:60%;height:44px;margin-bottom:8px;"></div>
-      <div class="skel" style="width:40%;"></div>
-      <div class="skel" style="width:50%;margin-bottom:2rem;"></div>
-      <div class="skel" style="width:100%;"></div>
-      <div class="skel" style="width:95%;"></div>
-      <div class="skel" style="width:90%;"></div>
-      <div class="skel" style="width:80%;"></div>
-      <div class="skel" style="width:100%;margin-top:1rem;"></div>
-      <div class="skel" style="width:88%;"></div>
-    </div>
-
-    <div class="preview" id="preview"></div>
-  </main>
-</div>
-
-<script>
-let currentData = null;
-
-function escHtml(s) {
-  return (s || "")
-    .replace(/<cite[^>]*>([\s\S]*?)<\/cite>/g, "$1")
-    .replace(/<\/?cite[^>]*>/g, "")
-    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  ]
 }
 
-function linkHtml(url) {
-  if (!url) return "";
-  return `<a class="source-link" href="${escHtml(url)}" target="_blank" rel="noreferrer">(Link)</a>`;
-}
+focus_items: 3-6 voci rilevanti al focus tematico richiesto."""
 
-async function generate() {
-  const nome = document.getElementById("nome").value.trim();
-  const istituzione = document.getElementById("istituzione").value.trim();
-  const focus = document.getElementById("focus").value.trim();
-  const dataMeeting = document.getElementById("dataMeeting").value;
 
-  if (!nome || !focus) { showError("Nome e focus tematico sono obbligatori."); return; }
+def strip_cite(text):
+    if not text:
+        return text
+    text = re.sub(r'<cite[^>]*>([\s\S]*?)</cite>', r'\1', text)
+    text = re.sub(r'</?cite[^>]*>', '', text)
+    text = re.sub(r'\[?\(Link\)\]?\([^)]*\)', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
-  setLoading(true);
-  hideError();
-  showSkeleton();
 
-  try {
-    const res = await fetch("/api/generate", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ nome, istituzione, focus, dataMeeting }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Errore sconosciuto");
-    currentData = { ...data, dataMeeting };
-    renderPreview(data, dataMeeting);
-  } catch (err) {
-    showError(err.message);
-    hideSkeleton();
-    document.getElementById("emptyState").style.display = "flex";
-  } finally {
-    setLoading(false);
-  }
-}
+def clean_obj(obj):
+    if isinstance(obj, str):
+        return strip_cite(obj)
+    elif isinstance(obj, list):
+        return [clean_obj(i) for i in obj]
+    elif isinstance(obj, dict):
+        return {k: clean_obj(v) for k, v in obj.items()}
+    return obj
 
-function renderPreview(d, dataMeeting) {
-  const today = dataMeeting
-    ? new Date(dataMeeting + "T12:00:00").toLocaleDateString("it-IT", { day: "numeric", month: "long", year: "numeric" })
-    : new Date().toLocaleDateString("it-IT", { day: "numeric", month: "long", year: "numeric" });
 
-  const focusHtml = (d.focus_items || []).map((item, i) => `
-    <div class="focus-item" id="focus-item-${i}">
-      <strong>${escHtml(item.titolo)}.</strong>
-      <span id="focus-text-${i}">${escHtml(item.testo)}</span>
-      ${linkHtml(item.url)}
-      <div class="section-actions">
-        <button class="edit-btn" onclick="toggleEdit('focus-item-${i}', 'focus-text-${i}', ${i})">Modifica</button>
-      </div>
-      <textarea class="edit-area" id="edit-focus-${i}" rows="4">${(item.testo||"")}</textarea>
-      <button class="save-btn" id="save-focus-${i}" onclick="saveField('focus-text-${i}', 'edit-focus-${i}', 'save-focus-${i}', 'edit-focus-area-${i}', ${i})">Salva</button>
-    </div>
-  `).join("");
+def call_anthropic_with_search(prompt):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    messages = [{"role": "user", "content": prompt}]
+    tools = [{"type": "web_search_20250305", "name": "web_search"}]
+    research_text = ""
 
-  document.getElementById("preview").innerHTML = `
-    <div class="preview-header">
-      <div class="preview-meta">Briefing Note · ${escHtml(d.istituzione_contesto||"")} · ${today}</div>
-      <div class="preview-name">${escHtml(d.nome)}</div>
-      <div class="preview-role">${escHtml(d.ruolo_attuale)}</div>
-      <div class="preview-bg">${escHtml(d.background_sintetico)}</div>
-    </div>
+    for _ in range(10):
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4000,
+            tools=tools,
+            messages=messages,
+        )
 
-    <div class="section">
-      <div class="section-label">Anagrafica</div>
-      <div class="section-content">${escHtml(d.luogo_nascita)}</div>
-    </div>
+        messages.append({"role": "assistant", "content": response.content})
 
-    <div class="section">
-      <div class="section-label">Carriera<br/>professionale</div>
-      <div class="section-content">
-        <span id="text-prof">${escHtml(d.carriera_professionale)}</span>
-        ${linkHtml(d.carriera_professionale_url)}
-        <div class="section-actions">
-          <button class="edit-btn" onclick="toggleEdit('text-prof', 'text-prof', 'prof')">Modifica</button>
-        </div>
-        <textarea class="edit-area" id="edit-prof">${(d.carriera_professionale||"")}</textarea>
-        <button class="save-btn" id="save-prof" onclick="saveFieldSimple('text-prof', 'edit-prof', 'save-prof', 'carriera_professionale')">Salva</button>
-      </div>
-    </div>
+        if response.stop_reason == "end_turn":
+            for block in response.content:
+                if hasattr(block, "text"):
+                    research_text = block.text
+            break
 
-    <div class="section">
-      <div class="section-label">Carriera<br/>politica</div>
-      <div class="section-content">
-        <span id="text-pol">${escHtml(d.carriera_politica)}</span>
-        ${linkHtml(d.carriera_politica_url)}
-        <div class="section-actions">
-          <button class="edit-btn" onclick="toggleEdit('text-pol', 'text-pol', 'pol')">Modifica</button>
-        </div>
-        <textarea class="edit-area" id="edit-pol">${(d.carriera_politica||"")}</textarea>
-        <button class="save-btn" id="save-pol" onclick="saveFieldSimple('text-pol', 'edit-pol', 'save-pol', 'carriera_politica')">Salva</button>
-      </div>
-    </div>
+        if response.stop_reason == "tool_use":
+            tool_results = []
+            for block in response.content:
+                if block.type == "tool_use":
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": "Continua la ricerca.",
+                    })
+            messages.append({"role": "user", "content": tool_results})
 
-    <div class="section">
-      <div class="section-label">Focus<br/>${escHtml(d.focus_titolo)}</div>
-      <div class="section-content">${focusHtml}</div>
-    </div>
+    return research_text
 
-    <div class="download-bar">
-      <button class="download-btn" id="downloadBtn" onclick="downloadDocx()">Scarica .docx</button>
-      <span class="download-hint">Nel formato CZP con hyperlink alle fonti</span>
-    </div>
-  `;
 
-  hideSkeleton();
-  document.getElementById("emptyState").style.display = "none";
-  document.getElementById("preview").classList.add("visible");
-}
+def call_anthropic_json(research_text, focus, data_meeting):
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
-function toggleEdit(containerId, textId, key) {
-  const editId = `edit-${key}`;
-  const saveId = `save-${key}`;
-  const editEl = document.getElementById(editId);
-  const saveEl = document.getElementById(saveId);
-  if (editEl) { editEl.classList.toggle("visible"); }
-  if (saveEl) { saveEl.classList.toggle("visible"); }
-}
+    user_msg = f"""Sulla base di queste informazioni, genera la briefing note in JSON:
 
-function saveFieldSimple(textId, editId, saveId, dataKey) {
-  const newVal = document.getElementById(editId).value;
-  document.getElementById(textId).textContent = newVal;
-  if (currentData) currentData[dataKey] = newVal;
-  document.getElementById(editId).classList.remove("visible");
-  document.getElementById(saveId).classList.remove("visible");
-}
+INFORMAZIONI RACCOLTE:
+{research_text}
 
-function saveField(textId, editId, saveId, areaId, index) {
-  const newVal = document.getElementById(editId).value;
-  document.getElementById(textId).textContent = newVal;
-  if (currentData && currentData.focus_items && currentData.focus_items[index]) {
-    currentData.focus_items[index].testo = newVal;
-  }
-  document.getElementById(editId).classList.remove("visible");
-  document.getElementById(saveId).classList.remove("visible");
-}
+FOCUS TEMATICO PER IL CLIENTE: {focus}
+{f'DATA MEETING: {data_meeting}' if data_meeting else ''}
 
-async function downloadDocx() {
-  if (!currentData) return;
-  const btn = document.getElementById("downloadBtn");
-  btn.disabled = true;
-  btn.textContent = "Generazione...";
-  try {
-    const res = await fetch("/api/docx", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(currentData),
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      alert("Errore: " + err.error);
-      return;
-    }
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `Briefing_Note_${(currentData.nome||"").replace(/\s+/g,"_")}.docx`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  } catch (err) {
-    alert("Errore download: " + err.message);
-  } finally {
-    btn.disabled = false;
-    btn.textContent = "Scarica .docx";
-  }
-}
+Rispondi SOLO con JSON valido, testo plain senza tag HTML."""
 
-function setLoading(on) {
-  const btn = document.getElementById("generateBtn");
-  btn.disabled = on;
-  document.getElementById("spinner").style.display = on ? "block" : "none";
-  document.getElementById("btnText").textContent = on ? "Generazione in corso…" : "Genera briefing note";
-  btn.classList.toggle("loading", on);
-}
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4000,
+        system=JSON_SYSTEM,
+        messages=[{"role": "user", "content": user_msg}],
+    )
 
-function showSkeleton() {
-  document.getElementById("emptyState").style.display = "none";
-  document.getElementById("preview").classList.remove("visible");
-  document.getElementById("skeleton").classList.add("visible");
-}
+    for block in response.content:
+        if hasattr(block, "text"):
+            return block.text
 
-function hideSkeleton() { document.getElementById("skeleton").classList.remove("visible"); }
-function showError(msg) { const el = document.getElementById("errorBox"); el.textContent = msg; el.classList.add("visible"); }
-function hideError() { document.getElementById("errorBox").classList.remove("visible"); }
+    return None
 
-document.addEventListener("keydown", e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) generate(); });
-</script>
-</body>
-</html>
+
+def add_hyperlink(paragraph, text, url):
+    part = paragraph.part
+    r_id = part.relate_to(url, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink", is_external=True)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+
+    rStyle = OxmlElement("w:rStyle")
+    rStyle.set(qn("w:val"), "Hyperlink")
+    rPr.append(rStyle)
+
+    color = OxmlElement("w:color")
+    color.set(qn("w:val"), "1155CC")
+    rPr.append(color)
+
+    u = OxmlElement("w:u")
+    u.set(qn("w:val"), "single")
+    rPr.append(u)
+
+    new_run.append(rPr)
+
+    t = OxmlElement("w:t")
+    t.text = text
+    t.set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    new_run.append(t)
+
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+
+
+def set_cell_border(cell, color="CCCCCC"):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    tcBorders = OxmlElement("w:tcBorders")
+    for side in ["top", "left", "bottom", "right"]:
+        border = OxmlElement(f"w:{side}")
+        border.set(qn("w:val"), "single")
+        border.set(qn("w:sz"), "4")
+        border.set(qn("w:color"), color)
+        tcBorders.append(border)
+    tcPr.append(tcBorders)
+
+
+def set_cell_shading(cell, fill="F2F2F2"):
+    tc = cell._tc
+    tcPr = tc.get_or_add_tcPr()
+    shd = OxmlElement("w:shd")
+    shd.set(qn("w:val"), "clear")
+    shd.set(qn("w:color"), "auto")
+    shd.set(qn("w:fill"), fill)
+    tcPr.append(shd)
+
+
+def generate_docx(d, data_meeting):
+    doc = Document()
+
+    section = doc.sections[0]
+    section.page_width = Cm(21)
+    section.page_height = Cm(29.7)
+    section.left_margin = Cm(2)
+    section.right_margin = Cm(2)
+    section.top_margin = Cm(2)
+    section.bottom_margin = Cm(2)
+
+    try:
+        hl_style = doc.styles["Hyperlink"]
+    except KeyError:
+        hl_style = doc.styles.add_style("Hyperlink", 2)
+        hl_style.font.color.rgb = RGBColor(0x11, 0x55, 0xCC)
+        hl_style.font.underline = True
+
+    if data_meeting:
+        try:
+            dt = datetime.strptime(data_meeting, "%Y-%m-%d")
+            today = dt.strftime("%-d %B %Y")
+        except:
+            today = data_meeting
+    else:
+        today = datetime.now().strftime("%-d %B %Y")
+
+    # BRIEFING NOTE header
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run("BRIEFING NOTE")
+    run.bold = True
+    run.font.size = Pt(20)
+    run.font.color.rgb = RGBColor(0x1F, 0x38, 0x64)
+    run.font.name = "Arial"
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run(d.get("istituzione_contesto", ""))
+    run.font.size = Pt(12)
+    run.font.color.rgb = RGBColor(0x44, 0x44, 0x44)
+    run.font.name = "Arial"
+
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = p.add_run(today)
+    run.font.size = Pt(11)
+    run.font.color.rgb = RGBColor(0x77, 0x77, 0x77)
+    run.font.name = "Arial"
+
+    doc.add_paragraph()
+
+    # Nome
+    p = doc.add_paragraph()
+    run = p.add_run(d.get("nome", ""))
+    run.bold = True
+    run.font.size = Pt(26)
+    run.font.color.rgb = RGBColor(0x1F, 0x38, 0x64)
+    run.font.name = "Arial"
+
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "12")
+    bottom.set(qn("w:space"), "4")
+    bottom.set(qn("w:color"), "1F3864")
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+    for text in [d.get("luogo_nascita", ""), d.get("ruolo_attuale", ""), d.get("background_sintetico", "")]:
+        p = doc.add_paragraph()
+        run = p.add_run(text)
+        run.font.size = Pt(10)
+        run.font.name = "Arial"
+
+    doc.add_paragraph()
+
+    # Tabella
+    table = doc.add_table(rows=0, cols=2)
+    table.style = "Table Grid"
+
+    def add_row(label, text, url=None, is_focus=False, focus_items=None):
+        row = table.add_row()
+
+        # Label cell
+        set_cell_border(row.cells[0])
+        set_cell_shading(row.cells[0])
+        p_label = row.cells[0].paragraphs[0]
+        run = p_label.add_run(label)
+        run.bold = True
+        run.font.size = Pt(10)
+        run.font.name = "Arial"
+
+        # Content cell
+        set_cell_border(row.cells[1])
+
+        if is_focus and focus_items:
+            cell = row.cells[1]
+            first = True
+            for item in focus_items:
+                p_content = cell.paragraphs[0] if first else cell.add_paragraph()
+                first = False
+
+                run_title = p_content.add_run(item.get("titolo", "") + ". ")
+                run_title.bold = True
+                run_title.font.size = Pt(10)
+                run_title.font.name = "Arial"
+
+                run_text = p_content.add_run(item.get("testo", ""))
+                run_text.font.size = Pt(10)
+                run_text.font.name = "Arial"
+
+                if item.get("url"):
+                    p_content.add_run(" ").font.size = Pt(10)
+                    add_hyperlink(p_content, "(Link)", item["url"])
+        else:
+            p_content = row.cells[1].paragraphs[0]
+            run_text = p_content.add_run(text or "")
+            run_text.font.size = Pt(10)
+            run_text.font.name = "Arial"
+            if url:
+                p_content.add_run(" ").font.size = Pt(10)
+                add_hyperlink(p_content, "(Link)", url)
+
+    add_row("Carriera professionale", d.get("carriera_professionale", ""), d.get("carriera_professionale_url"))
+    add_row("Carriera politica", d.get("carriera_politica", ""), d.get("carriera_politica_url"))
+    add_row(f"Focus: {d.get('focus_titolo', '')}", None, is_focus=True, focus_items=d.get("focus_items", []))
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@app.route("/")
+def index():
+    return render_template("index.html")
+
+
+@app.route("/api/generate", methods=["POST"])
+def generate():
+    data = request.get_json()
+    nome = data.get("nome", "").strip()
+    istituzione = data.get("istituzione", "").strip()
+    focus = data.get("focus", "").strip()
+    data_meeting = data.get("dataMeeting", "")
+
+    if not nome or not focus:
+        return jsonify({"error": "Nome e focus sono obbligatori."}), 400
+
+    try:
+        istituzione_str = f"\n- Istituzione / ruolo: {istituzione}" if istituzione else ""
+        search_prompt = SEARCH_PROMPT.format(
+            nome=nome,
+            istituzione=istituzione_str,
+            focus=focus
+        )
+        research_text = call_anthropic_with_search(search_prompt)
+
+        if not research_text:
+            return jsonify({"error": "Nessun risultato dalla ricerca."}), 500
+
+        clean_research = strip_cite(research_text)
+
+        json_text = call_anthropic_json(clean_research, focus, data_meeting)
+        if not json_text:
+            return jsonify({"error": "Nessun JSON nella risposta."}), 500
+
+        clean_json = re.sub(r'```json|```', '', json_text).strip()
+        parsed = json.loads(clean_json)
+        parsed = clean_obj(parsed)
+
+        return jsonify(parsed)
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/docx", methods=["POST"])
+def docx_endpoint():
+    data = request.get_json()
+    data_meeting = data.get("dataMeeting", "")
+
+    try:
+        buf = generate_docx(data, data_meeting)
+        nome = data.get("nome", "briefing").replace(" ", "_")
+        return send_file(
+            buf,
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            as_attachment=True,
+            download_name=f"Briefing_Note_{nome}.docx"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
